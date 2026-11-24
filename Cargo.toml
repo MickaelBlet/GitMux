@@ -1,0 +1,17 @@
+[package]
+name = "gitmux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.105"
+crossterm = "0.29.0"
+directories = "6.0.0"
+git2 = { version = "0.21.0", default-features = false }
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
+unicode-width = "0.2.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"

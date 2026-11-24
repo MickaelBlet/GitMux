@@ -1,0 +1,18 @@
+# ~/.config/gitmux/config.toml
+commit_limit = 500
+tree_view = true
+side_by_side = false
+left_width_pct = 38
+show_command_log = true
+auto_fetch_secs = 300
+default_remote = "origin"
+
+[theme]
+accent = "lightgreen"
+selected_bg = "#2d3550"
+
+[keybindings.files]
+Commit = "c"
+
+[keybindings.commits]
+CherryCopy = "c"
