@@ -136,6 +136,7 @@ The config section name (see [configuration](configuration.md)) and the action n
 | `T` | tag commit | `TagCommit` |
 | `n` | new branch at commit | `BranchFromCommit` |
 | `D` | reset to commit | `ResetToCommit` |
+| `o` | go to file of the commit | `GoToFile` |
 
 ## Reflog (`reflog`)
 
@@ -145,6 +146,7 @@ The config section name (see [configuration](configuration.md)) and the action n
 | `D` | reset to commit | `ResetToCommit` |
 | `C` | copy for cherry-pick | `CherryCopy` |
 | `n` | new branch at commit | `BranchFromCommit` |
+| `o` | go to file of the commit | `GoToFile` |
 
 ## Stash (`stash`)
 
@@ -204,10 +206,16 @@ The config section name (see [configuration](configuration.md)) and the action n
 | `N` | prev hunk | `PrevHunk` |
 | `}` | next file | `NextFile` |
 | `{` | prev file | `PrevFile` |
+| `o` | go to file (filterable list of the commit's files) | `GoToFile` |
 
 In commit / stash views the file being read stays pinned on the first row; click
 it to jump back to the start of that file. Double-click a `--stat` line to jump
 to its diff.
+
+`o` (also from the commits / reflog panels) opens a file picker listing every
+file of the commit / stash with its `+/-` counts: type to filter (fuzzy, case
+insensitive), `up` / `down` (or `ctrl+p` / `ctrl+n`) to select, `enter` or
+click to jump to the file's diff, `esc` to close.
 
 ## Main view: conflict (`conflict`)
 

@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Commit tooltip on hover: full hash, author / email, date, refs, parents,
   full message.
 - Draggable scrollbar in help / message popups.
+- Go-to-file picker (`o` in the main view, commits and reflog panels):
+  fuzzy-filterable list of the commit / stash files with `+/-` counts,
+  jumps to the selected file's diff (keyboard and mouse).
 
 ### Changed
 

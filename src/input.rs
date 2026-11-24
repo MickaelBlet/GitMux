@@ -184,6 +184,13 @@ impl App {
             Popup::Help { .. } | Popup::Message { .. } => {
                 self.popups.pop();
             }
+            Popup::Files(fp) => {
+                self.popups.pop();
+                if let Some(f) = fp.selected() {
+                    self.focus_panel(PanelId::Main);
+                    self.main.scroll_to_line(f.line);
+                }
+            }
         }
     }
 
@@ -241,6 +248,22 @@ impl App {
                     }
                 }
                 _ => {}
+            },
+            Popup::Files(fp) => match k.code {
+                KeyCode::Enter => self.popup_ok(),
+                KeyCode::Up => fp.move_sel(-1),
+                KeyCode::Down => fp.move_sel(1),
+                KeyCode::Char('p') if ctrl => fp.move_sel(-1),
+                KeyCode::Char('n') if ctrl => fp.move_sel(1),
+                KeyCode::PageUp => fp.move_sel(-10),
+                KeyCode::PageDown => fp.move_sel(10),
+                _ => {
+                    let before = fp.input.text();
+                    fp.input.handle_key(&k);
+                    if fp.input.text() != before {
+                        fp.sel = 0;
+                    }
+                }
             },
             Popup::Commit(c) => match k.code {
                 KeyCode::Enter if alt || shift => c.input.newline(),
@@ -378,7 +401,12 @@ impl App {
             // click outside a popup closes informational popups
             if matches!(
                 self.popups.last(),
-                Some(Popup::Menu { .. } | Popup::Help { .. } | Popup::Message { .. })
+                Some(
+                    Popup::Menu { .. }
+                        | Popup::Help { .. }
+                        | Popup::Message { .. }
+                        | Popup::Files(_)
+                )
             ) {
                 self.popups.pop();
             }
@@ -413,8 +441,10 @@ impl App {
             Hit::SplitH => self.drag = Some(Drag::SplitH),
             Hit::Hint(a) => self.dispatch(a),
             Hit::MenuItem(i) => {
-                if let Some(Popup::Menu { sel, .. }) = self.popups.last_mut() {
-                    *sel = i;
+                match self.popups.last_mut() {
+                    Some(Popup::Menu { sel, .. }) => *sel = i,
+                    Some(Popup::Files(fp)) => fp.sel = i,
+                    _ => {}
                 }
                 self.popup_ok();
             }
@@ -591,6 +621,7 @@ impl App {
                 Popup::Help { scroll } | Popup::Message { scroll, .. } => {
                     *scroll = (*scroll as isize + d).max(0) as usize
                 }
+                Popup::Files(fp) => fp.move_sel(d.signum()),
                 Popup::Rebase { entries, sel, .. } => {
                     *sel =
                         (*sel as isize + d.signum()).clamp(0, entries.len() as isize - 1) as usize
@@ -657,6 +688,7 @@ impl App {
         };
         match self.popups.last_mut() {
             Some(Popup::Input { input, .. }) => place(input, 0, off),
+            Some(Popup::Files(fp)) => place(&mut fp.input, 0, off),
             Some(Popup::Commit(c)) => place(&mut c.input, row, 0),
             _ => {}
         }

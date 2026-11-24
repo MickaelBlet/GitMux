@@ -2,7 +2,7 @@
 
 use super::hit::{Btn, Hit};
 use super::{FOCUS, button, hovered};
-use crate::app::{App, Popup};
+use crate::app::{App, FilePicker, PickerFile, Popup};
 use crate::git::rebase::TodoAction;
 use crate::keymap::Ctx;
 use ratatui::Frame;
@@ -182,6 +182,7 @@ fn draw_one(f: &mut Frame, app: &mut App, area: Rect, p: &Popup, top: bool) {
                 app.hits.push(row, Hit::MenuItem(i));
             }
         }
+        Popup::Files(fp) => draw_files(f, app, area, fp, top),
         Popup::Commit(c) => {
             let title = if c.reword.is_some() || c.only {
                 "Reword commit"
@@ -480,4 +481,96 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         out.push(Line::raw(l));
     }
     out
+}
+
+/// File picker of a commit / stash view: query line, then the matching files.
+fn draw_files(f: &mut Frame, app: &mut App, area: Rect, fp: &FilePicker, top: bool) {
+    let m = fp.matches();
+    let stat = |pf: &PickerFile| format!("+{} -{}", pf.added, pf.removed);
+    let w = fp
+        .files
+        .iter()
+        .map(|pf| pf.path.width() + stat(pf).width() + 4)
+        .max()
+        .unwrap_or(0)
+        .max(50) as u16
+        + 2;
+    let h = fp.files.len().max(1) as u16 + 4;
+    let r = centered(area, w, h);
+    let title = format!("Go to file ({}/{})", m.len(), fp.files.len());
+    let inner = frame(f, app, r, &title, FOCUS);
+    if inner.height < 3 {
+        return;
+    }
+    // query
+    let q = Rect::new(inner.x, inner.y, inner.width, 1);
+    let prompt = "> ";
+    let pw = prompt.width() as u16;
+    let text = &fp.input.lines[0];
+    let cw = text.chars().take(fp.input.col).collect::<String>().width() as u16;
+    let avail = q.width.saturating_sub(pw + 1);
+    let start = cw.saturating_sub(avail);
+    let shown: String = text.chars().skip(start as usize).collect();
+    let buf = f.buffer_mut();
+    buf.set_string(q.x, q.y, prompt, Style::default().fg(Color::LightCyan));
+    buf.set_stringn(q.x + pw, q.y, shown, avail as usize + 1, Style::default());
+    let qa = Rect::new(q.x + pw, q.y, q.width.saturating_sub(pw), 1);
+    app.hits.push(qa, Hit::InputText);
+    app.hits.input_area = Some((qa, start as usize));
+    if top {
+        f.set_cursor_position(Position::new(qa.x + cw - start, q.y));
+    }
+    let sep = "─".repeat(inner.width as usize);
+    f.buffer_mut().set_string(
+        inner.x,
+        inner.y + 1,
+        sep,
+        Style::default().fg(Color::DarkGray),
+    );
+    // list
+    let list = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2);
+    let h = list.height as usize;
+    let off = if fp.sel >= h { fp.sel + 1 - h } else { 0 };
+    for (vi, &fi) in m.iter().enumerate().skip(off).take(h) {
+        let pf = &fp.files[fi];
+        let row = Rect::new(list.x, list.y + (vi - off) as u16, list.width, 1);
+        let st = if vi == fp.sel {
+            Style::default().bg(app.theme.selected_bg)
+        } else if hovered(app, row) {
+            Style::default().bg(Color::Indexed(236))
+        } else {
+            Style::default()
+        };
+        f.buffer_mut().set_style(row, st);
+        let (dir, name) = match pf.path.rsplit_once('/') {
+            Some((d, n)) => (format!("{d}/"), n.to_string()),
+            None => (String::new(), pf.path.clone()),
+        };
+        let line = Line::from(vec![
+            Span::styled(dir, Style::default().fg(Color::DarkGray)),
+            Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        ]);
+        let st_add = format!("+{}", pf.added);
+        let st_del = format!(" -{}", pf.removed);
+        let sw = (st_add.width() + st_del.width()) as u16;
+        let buf = f.buffer_mut();
+        buf.set_line(row.x + 1, row.y, &line, row.width.saturating_sub(sw + 3));
+        let sx = row.right().saturating_sub(sw + 1);
+        buf.set_string(sx, row.y, &st_add, Style::default().fg(app.theme.added));
+        buf.set_string(
+            sx + st_add.width() as u16,
+            row.y,
+            &st_del,
+            Style::default().fg(app.theme.removed),
+        );
+        app.hits.push(row, Hit::MenuItem(vi));
+    }
+    if m.is_empty() {
+        f.buffer_mut().set_string(
+            list.x + 1,
+            list.y,
+            "no match",
+            Style::default().fg(Color::DarkGray),
+        );
+    }
 }

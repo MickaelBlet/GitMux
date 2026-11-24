@@ -470,6 +470,81 @@ pub enum Popup {
         sel: usize,
         base: Option<String>,
     },
+    /// Filterable list of the files of a commit / stash view.
+    Files(FilePicker),
+}
+
+/// One file of a commit / stash view.
+#[derive(Clone, Debug)]
+pub struct PickerFile {
+    pub path: String,
+    /// First text line of its diff section.
+    pub line: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct FilePicker {
+    pub input: TextInput,
+    pub files: Vec<PickerFile>,
+    /// Index into `matches()`.
+    pub sel: usize,
+}
+
+impl FilePicker {
+    pub fn new(view: &MainView) -> Self {
+        let files: Vec<PickerFile> = view
+            .sections
+            .iter()
+            .map(|s| PickerFile {
+                path: s.path.clone(),
+                line: s.start,
+                added: s
+                    .rows
+                    .iter()
+                    .filter(|r| r.kind == diff::RowKind::Add)
+                    .count(),
+                removed: s
+                    .rows
+                    .iter()
+                    .filter(|r| r.kind == diff::RowKind::Del)
+                    .count(),
+            })
+            .collect();
+        // preselect the file being read
+        let top = view.text_line(view.scroll);
+        let sel = files.iter().rposition(|f| f.line <= top).unwrap_or(0);
+        FilePicker {
+            input: TextInput::new("", false),
+            files,
+            sel,
+        }
+    }
+    /// Indices of the files matching the query (case-insensitive subsequence).
+    pub fn matches(&self) -> Vec<usize> {
+        let q: Vec<char> = self.input.text().to_lowercase().chars().collect();
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| fuzzy_match(&f.path.to_lowercase(), &q))
+            .map(|(i, _)| i)
+            .collect()
+    }
+    pub fn selected(&self) -> Option<&PickerFile> {
+        self.matches().get(self.sel).map(|&i| &self.files[i])
+    }
+    pub fn move_sel(&mut self, d: isize) {
+        let n = self.matches().len() as isize;
+        self.sel = (self.sel as isize + d).clamp(0, (n - 1).max(0)) as usize;
+    }
+}
+
+fn fuzzy_match(hay: &str, q: &[char]) -> bool {
+    let mut it = hay.chars();
+    q.iter()
+        .filter(|c| !c.is_whitespace())
+        .all(|c| it.any(|h| h == *c))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1471,5 +1546,16 @@ diff --git a/d/b.rs b/d/b.rs\n--- a/d/b.rs\n+++ b/d/b.rs\n@@ -1 +1,2 @@\n a\n+b\
         assert_eq!(v.text_line(v.scroll), 7);
         v.scroll_to_line(14);
         assert_eq!(v.text_line(v.scroll), 14);
+        // file picker: preselects the file on top, filters by subsequence
+        let mut fp = FilePicker::new(&v);
+        assert_eq!(fp.sel, 1);
+        assert_eq!(fp.files[1].path, "d/b.rs");
+        assert_eq!((fp.files[0].added, fp.files[0].removed), (2, 2));
+        fp.input.insert_str("DB");
+        assert_eq!(fp.matches(), vec![1]);
+        fp.sel = 0;
+        assert_eq!(fp.selected().map(|f| f.line), Some(14));
+        fp.input.insert_str("x");
+        assert!(fp.selected().is_none());
     }
 }

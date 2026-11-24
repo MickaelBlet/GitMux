@@ -132,6 +132,7 @@ actions! {
     PrevHunk => "prev hunk",
     NextFile => "next file",
     PrevFile => "prev file",
+    GoToFile => "go to file",
     ScrollLeft => "scroll left",
     ScrollRight => "scroll right",
     // conflict

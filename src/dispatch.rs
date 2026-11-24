@@ -837,6 +837,12 @@ impl App {
                     self.reload_main_file();
                 }
             }
+            GoToFile => {
+                if self.main.sections.is_empty() {
+                    return;
+                }
+                self.popups.push(Popup::Files(FilePicker::new(&self.main)));
+            }
             NextFile | PrevFile => {
                 if let Some(l) = self.main.text_jump(a == NextFile, false) {
                     self.main.scroll_to_line(l);

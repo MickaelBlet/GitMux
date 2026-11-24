@@ -15,6 +15,7 @@
 | double-click             | blame / history line     | show that commit                                           |
 | double-click             | `--stat` line (commit)   | jump to that file's diff                                  |
 | click                    | pinned file header       | jump to the start of that file                             |
+| click / wheel            | go-to-file picker (`o`)  | jump to that file / move the selection                     |
 | hover                    | commit                   | tooltip: full hash, author / email, date, refs, parents, full message |
 | right-click              | anywhere                 | actions menu of the item under the cursor                  |
 | wheel                    | any panel                | scroll the panel under the cursor (shift: horizontal)      |
@@ -23,7 +24,7 @@
 | drag                     | diff                     | select a range of lines (then `space` / `d` / `y`)         |
 | drag                     | rebase todo row          | reorder commits                                            |
 | click                    | commit popup             | place the cursor; toggle amend / no-verify / signoff       |
-| click outside            | menu / help / message    | close it                                                   |
+| click outside            | menu / help / message / file picker | close it                                                   |
 
 Copy (`y`) uses OSC 52, supported by most terminals (and tmux with
 `set -g set-clipboard on`).
