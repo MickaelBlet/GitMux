@@ -2,14 +2,17 @@
 commit_limit = 500
 tree_view = true
 side_by_side = false
-left_width_pct = 38
+left_width = 40
 show_command_log = true
 auto_fetch_secs = 300
 default_remote = "origin"
+syntax_highlight = true
+word_diff = true
 
 [theme]
 accent = "lightgreen"
 selected_bg = "#2d3550"
+syntax_theme = "base16-eighties.dark"
 
 [keybindings.files]
 Commit = "c"

@@ -29,3 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/` with an example config in `examples/`.
 - GitHub Actions workflow building x86_64 / aarch64 Linux binaries
   compatible with glibc 2.28.
+- Syntax highlighting (syntect) in diffs and commit / stash views, computed
+  in the background (`syntax_highlight`, `theme.syntax_theme`).
+- Colored backgrounds for added / removed lines and changed-word emphasis
+  (`word_diff`, `theme.added_bg` / `removed_bg` / `added_word_bg` /
+  `removed_word_bg`).
+- Side-by-side, word diff and full-context (`F`) display in commit / stash
+  views, with toggle buttons in the main view title.
+- Next / previous file (`}` / `{`) and hunk (`n` / `N`) navigation in commit
+  views; the current file header stays pinned on top (click to jump back),
+  double-click a `--stat` line to jump to its diff.
+- Commit tooltip on hover: full hash, author / email, date, refs, parents,
+  full message.
+- Draggable scrollbar in help / message popups.
+
+### Changed
+
+- `left_width_pct` config option replaced by `left_width` (columns, min 20).

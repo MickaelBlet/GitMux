@@ -14,6 +14,11 @@ pub struct Theme {
     pub hunk: Option<String>,
     pub border: Option<String>,
     pub dim: Option<String>,
+    pub added_bg: Option<String>,
+    pub removed_bg: Option<String>,
+    pub added_word_bg: Option<String>,
+    pub removed_word_bg: Option<String>,
+    pub syntax_theme: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -22,7 +27,9 @@ pub struct Config {
     pub commit_limit: usize,
     pub tree_view: bool,
     pub side_by_side: bool,
-    pub left_width_pct: u16,
+    pub syntax_highlight: bool,
+    pub word_diff: bool,
+    pub left_width: u16,
     pub show_command_log: bool,
     pub auto_fetch_secs: u64,
     pub default_remote: String,
@@ -36,7 +43,9 @@ impl Default for Config {
             commit_limit: 300,
             tree_view: true,
             side_by_side: false,
-            left_width_pct: 35,
+            syntax_highlight: true,
+            word_diff: true,
+            left_width: 40,
             show_command_log: true,
             auto_fetch_secs: 0,
             default_remote: "origin".into(),

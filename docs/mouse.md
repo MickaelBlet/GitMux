@@ -13,6 +13,9 @@
 | double-click             | diff line / hunk header  | stage / unstage that line (or the hunk)                    |
 | double-click             | conflict side            | keep ours / theirs (marker line: both)                     |
 | double-click             | blame / history line     | show that commit                                           |
+| double-click             | `--stat` line (commit)   | jump to that file's diff                                  |
+| click                    | pinned file header       | jump to the start of that file                             |
+| hover                    | commit                   | tooltip: full hash, author / email, date, refs, parents, full message |
 | right-click              | anywhere                 | actions menu of the item under the cursor                  |
 | wheel                    | any panel                | scroll the panel under the cursor (shift: horizontal)      |
 | drag                     | main view left border    | resize the left column                                     |

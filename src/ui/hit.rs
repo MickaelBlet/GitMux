@@ -19,6 +19,9 @@ pub enum Btn {
     StageView,
     SideBySide,
     WordDiff,
+    FullFile,
+    /// Sticky file header of a text view: jump to the file's diff.
+    StickyFile(usize),
     TodoUp,
     TodoDown,
 }
@@ -29,6 +32,8 @@ pub enum Hit {
     Row(PanelId, usize),
     Tab(PanelId, usize),
     Scrollbar(PanelId),
+    /// Scrollbar of the top popup, with its max scroll offset.
+    PopupScrollbar(usize),
     SplitV,
     SplitH,
     Hint(Action),

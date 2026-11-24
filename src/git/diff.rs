@@ -1,6 +1,9 @@
 //! Unified diff parsing and partial patch construction (hunk / line staging).
 
+use ratatui::text::Span;
+use similar::{Algorithm, DiffTag, capture_diff_slices};
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 #[derive(Clone, Debug, Default)]
 pub struct Hunk {
@@ -32,6 +35,11 @@ pub struct Row {
     pub kind: RowKind,
     pub hunk: Option<usize>,
     pub line: Option<usize>,
+    /// Old / new file line numbers (content rows only).
+    pub old_no: Option<usize>,
+    pub new_no: Option<usize>,
+    /// Styled content without the `+` / `-` / ` ` prefix, filled by `highlight::decorate`.
+    pub spans: Vec<Span<'static>>,
 }
 
 fn parse_range(s: &str) -> usize {
@@ -86,6 +94,9 @@ impl FileDiff {
                 kind: RowKind::Header,
                 hunk: None,
                 line: None,
+                old_no: None,
+                new_no: None,
+                spans: vec![],
             })
             .collect();
         for (hi, h) in self.hunks.iter().enumerate() {
@@ -94,7 +105,11 @@ impl FileDiff {
                 kind: RowKind::HunkHeader,
                 hunk: Some(hi),
                 line: None,
+                old_no: None,
+                new_no: None,
+                spans: vec![],
             });
+            let (mut o, mut n) = (h.old_start, h.new_start);
             for (li, l) in h.lines.iter().enumerate() {
                 let kind = match l.chars().next() {
                     Some('+') => RowKind::Add,
@@ -102,11 +117,22 @@ impl FileDiff {
                     Some('\\') => RowKind::NoNewline,
                     _ => RowKind::Context,
                 };
+                let (old_no, new_no) = match kind {
+                    RowKind::Add => (None, Some(n)),
+                    RowKind::Del => (Some(o), None),
+                    RowKind::Context => (Some(o), Some(n)),
+                    _ => (None, None),
+                };
+                o += old_no.is_some() as usize;
+                n += new_no.is_some() as usize;
                 rows.push(Row {
                     text: l.clone(),
                     kind,
                     hunk: Some(hi),
                     line: Some(li),
+                    old_no,
+                    new_no,
+                    spans: vec![],
                 });
             }
         }
@@ -206,6 +232,25 @@ impl FileDiff {
     }
 }
 
+/// Consume a block of `-` lines followed by `+` lines starting at `*i`.
+fn take_block(rows: &[Row], i: &mut usize) -> (Vec<usize>, Vec<usize>) {
+    let mut dels = vec![];
+    let mut adds = vec![];
+    while *i < rows.len() && matches!(rows[*i].kind, RowKind::Del | RowKind::NoNewline) {
+        if rows[*i].kind == RowKind::Del {
+            dels.push(*i);
+        }
+        *i += 1;
+    }
+    while *i < rows.len() && matches!(rows[*i].kind, RowKind::Add | RowKind::NoNewline) {
+        if rows[*i].kind == RowKind::Add {
+            adds.push(*i);
+        }
+        *i += 1;
+    }
+    (dels, adds)
+}
+
 /// Side-by-side pairing: (left row idx, right row idx) per visual row.
 pub fn side_by_side(rows: &[Row]) -> Vec<(Option<usize>, Option<usize>)> {
     let mut out = Vec::new();
@@ -213,18 +258,7 @@ pub fn side_by_side(rows: &[Row]) -> Vec<(Option<usize>, Option<usize>)> {
     while i < rows.len() {
         match rows[i].kind {
             RowKind::Del | RowKind::Add => {
-                let mut dels = vec![];
-                let mut adds = vec![];
-                while i < rows.len() && rows[i].kind == RowKind::Del {
-                    dels.push(i);
-                    i += 1;
-                }
-                while i < rows.len() && matches!(rows[i].kind, RowKind::Add | RowKind::NoNewline) {
-                    if rows[i].kind == RowKind::Add {
-                        adds.push(i);
-                    }
-                    i += 1;
-                }
+                let (dels, adds) = take_block(rows, &mut i);
                 for k in 0..dels.len().max(adds.len()) {
                     out.push((dels.get(k).copied(), adds.get(k).copied()));
                 }
@@ -237,6 +271,87 @@ pub fn side_by_side(rows: &[Row]) -> Vec<(Option<usize>, Option<usize>)> {
         }
     }
     out
+}
+
+/// Blocks of consecutive removed / added rows (row indices).
+pub fn change_blocks(rows: &[Row]) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if matches!(rows[i].kind, RowKind::Del | RowKind::Add) {
+            out.push(take_block(rows, &mut i));
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Split a line into word / whitespace / punctuation tokens with their byte offset.
+fn tokens(s: &str) -> Vec<(usize, &str)> {
+    fn class(c: char) -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut prev: Option<u8> = None;
+    for (i, c) in s.char_indices() {
+        let k = class(c);
+        if prev.is_some() && (prev != Some(k) || k == 2) {
+            out.push((start, &s[start..i]));
+            start = i;
+        }
+        prev = Some(k);
+    }
+    if start < s.len() {
+        out.push((start, &s[start..]));
+    }
+    out
+}
+
+/// Changed byte ranges of `old` and `new` at word granularity.
+/// Empty when the lines have too little in common to be worth highlighting.
+pub fn word_ranges(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let (a, b) = (tokens(old), tokens(new));
+    let (ta, tb): (Vec<&str>, Vec<&str>) = (
+        a.iter().map(|t| t.1).collect(),
+        b.iter().map(|t| t.1).collect(),
+    );
+    let span = |t: &[(usize, &str)], r: Range<usize>| -> Option<Range<usize>> {
+        let first = t.get(r.start)?;
+        let last = t.get(r.end.checked_sub(1)?)?;
+        Some(first.0..last.0 + last.1.len())
+    };
+    let push = |v: &mut Vec<Range<usize>>, r: Range<usize>| match v.last_mut() {
+        Some(l) if l.end == r.start => l.end = r.end,
+        _ => v.push(r),
+    };
+    let (mut ro, mut rn) = (vec![], vec![]);
+    let mut same = 0;
+    for op in capture_diff_slices(Algorithm::Myers, &ta, &tb) {
+        let (tag, o, n) = op.as_tag_tuple();
+        if tag == DiffTag::Equal {
+            same += ta[o].iter().map(|t| t.trim().len()).sum::<usize>();
+            continue;
+        }
+        if let Some(r) = span(&a, o) {
+            push(&mut ro, r);
+        }
+        if let Some(r) = span(&b, n) {
+            push(&mut rn, r);
+        }
+    }
+    let total = old.trim().len().max(new.trim().len());
+    if total == 0 || same * 10 < total * 4 {
+        return (vec![], vec![]);
+    }
+    (ro, rn)
 }
 
 /// A conflict region in a file with conflict markers (line indices).
@@ -344,5 +459,37 @@ mod tests {
         let rows = parse(D).rows();
         let s = side_by_side(&rows);
         assert!(s.iter().any(|(l, r)| l.is_some() && r.is_some() && l != r));
+    }
+
+    #[test]
+    fn line_numbers() {
+        let rows = parse(D).rows();
+        let nos: Vec<_> = rows.iter().map(|r| (r.old_no, r.new_no)).collect();
+        assert_eq!(
+            &nos[5..],
+            &[
+                (Some(1), Some(1)),
+                (Some(2), None),
+                (None, Some(2)),
+                (Some(3), Some(3))
+            ]
+        );
+    }
+
+    #[test]
+    fn blocks() {
+        let d = "@@ -1,3 +1,2 @@\n-a\n-b\n+c\n x\n";
+        let rows = parse(d).rows();
+        assert_eq!(change_blocks(&rows), vec![(vec![1, 2], vec![3])]);
+    }
+
+    #[test]
+    fn words() {
+        let (o, n) = word_ranges("let x = foo(a);", "let x = foo(bar);");
+        assert_eq!(o, vec![12..13]);
+        assert_eq!(n, vec![12..15]);
+        // unrelated lines: no word emphasis
+        assert_eq!(word_ranges("abc def", "xyz uvw"), (vec![], vec![]));
+        assert_eq!(word_ranges("", "x"), (vec![], vec![]));
     }
 }

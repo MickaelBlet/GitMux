@@ -7,6 +7,7 @@ use crate::git::diff::{self, Conflict, FileDiff, Row};
 use crate::git::read::{self, CommitInfo, RepoData};
 use crate::git::rebase::TodoEntry;
 use crate::git::{CmdLog, Git};
+use crate::highlight;
 use crate::keymap::{Ctx, Keymap};
 use crate::textinput::TextInput;
 use crate::theme::Theme;
@@ -18,6 +19,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -102,16 +105,62 @@ pub enum MainKind {
     },
 }
 
+/// One `diff --git` section of a text view: its rows map 1:1 to `text[start..]`.
+#[derive(Clone, Debug)]
+pub struct DiffSection {
+    pub start: usize,
+    pub path: String,
+    pub rows: Vec<Row>,
+}
+
+/// Visual row of a side-by-side text view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRow {
+    /// Plain text line (index into `text`).
+    Line(usize),
+    /// Diff rows (left, right) of a section.
+    Pair(usize, Option<usize>, Option<usize>),
+}
+
+/// Side-by-side layout of a text view with diff sections.
+pub fn text_rows(len: usize, sections: &[DiffSection]) -> Vec<TextRow> {
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    for (si, s) in sections.iter().enumerate() {
+        out.extend((i..s.start).map(TextRow::Line));
+        out.extend(
+            diff::side_by_side(&s.rows)
+                .into_iter()
+                .map(|(l, r)| TextRow::Pair(si, l, r)),
+        );
+        i = s.start + s.rows.len();
+    }
+    out.extend((i..len).map(TextRow::Line));
+    out
+}
+
 #[derive(Clone, Debug)]
 pub struct MainView {
     pub title: String,
     pub kind: MainKind,
     pub text: Vec<Line<'static>>,
+    /// Diff sections inside `text` (commit / stash views).
+    pub sections: Vec<DiffSection>,
+    /// Side-by-side layout of `text`, used when `sbs` is on.
+    pub pairs: Vec<TextRow>,
+    /// Side-by-side display of a text view with diff sections.
+    pub sbs: bool,
+    /// Raw text of a text view (re-styled when word diff is toggled).
+    pub source: String,
+    /// Commit shown by a commit view (re-read for full context).
+    pub rev: Option<String>,
     pub cursor: usize,
     pub anchor: Option<usize>,
     pub scroll: usize,
     pub hscroll: usize,
     pub height: usize,
+    /// Pending background highlight id (0 = none).
+    pub hl_gen: u64,
 }
 
 impl Default for MainView {
@@ -120,11 +169,17 @@ impl Default for MainView {
             title: String::new(),
             kind: MainKind::Empty,
             text: vec![],
+            sections: vec![],
+            pairs: vec![],
+            sbs: false,
+            source: String::new(),
+            rev: None,
             cursor: 0,
             anchor: None,
             scroll: 0,
             hscroll: 0,
             height: 10,
+            hl_gen: 0,
         }
     }
 }
@@ -133,12 +188,106 @@ impl MainView {
     pub fn len(&self) -> usize {
         match &self.kind {
             MainKind::Empty => 0,
+            MainKind::Text if self.sbs_text() => self.pairs.len(),
             MainKind::Text => self.text.len(),
             MainKind::Diff { rows, .. } => rows.len(),
             MainKind::Conflict { lines, .. } => lines.len(),
             MainKind::Blame { lines, .. } => lines.len(),
             MainKind::History { commits, .. } => commits.len(),
         }
+    }
+    /// Text view currently drawn side by side.
+    pub fn sbs_text(&self) -> bool {
+        self.sbs && matches!(self.kind, MainKind::Text) && !self.sections.is_empty()
+    }
+    /// Text line shown at visual row `v`.
+    pub fn text_line(&self, v: usize) -> usize {
+        if !self.sbs_text() {
+            return v;
+        }
+        match self.pairs.get(v) {
+            Some(TextRow::Line(i)) => *i,
+            Some(TextRow::Pair(s, l, r)) => self.sections[*s].start + l.or(*r).unwrap_or(0),
+            None => self.text.len(),
+        }
+    }
+    /// Diff section containing text line `l`.
+    pub fn section_at(&self, l: usize) -> Option<&DiffSection> {
+        self.sections
+            .iter()
+            .find(|s| l >= s.start && l < s.start + s.rows.len())
+    }
+    /// Scroll so that text line `l` is at the top.
+    pub fn scroll_to_line(&mut self, l: usize) {
+        self.scroll = if self.sbs_text() {
+            (0..self.pairs.len())
+                .find(|&v| self.text_line(v) >= l)
+                .unwrap_or(self.pairs.len())
+        } else {
+            l
+        };
+        self.scroll_by(0);
+    }
+    /// Text line starting the next (`fwd`) or previous diff section / hunk
+    /// relative to the top of the view.
+    pub fn text_jump(&self, fwd: bool, hunk: bool) -> Option<usize> {
+        let top = self.text_line(self.scroll);
+        // a hunk is shown one row below the sticky file header
+        let shown = |l: usize| if hunk { l.saturating_sub(1) } else { l };
+        let mut marks: Vec<usize> = vec![];
+        for s in &self.sections {
+            if hunk {
+                marks.extend(
+                    s.rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.kind == diff::RowKind::HunkHeader)
+                        .map(|(i, _)| s.start + i),
+                );
+            } else {
+                marks.push(s.start);
+            }
+        }
+        if fwd {
+            marks.into_iter().find(|&m| shown(m) > top)
+        } else {
+            marks.into_iter().rev().find(|&m| shown(m) < top)
+        }
+    }
+    /// Diff section listed on a `--stat` line (` path | 3 ++-`).
+    pub fn stat_target(&self, l: usize) -> Option<usize> {
+        let line: String = self
+            .text
+            .get(l)?
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let (name, _) = line.split_once(" | ")?;
+        let name = name.trim();
+        let name = name.strip_prefix("...").unwrap_or(name);
+        // renames are shown as `a => b` or `dir/{a => b}`
+        let name = name.rsplit("=> ").next()?.trim_end_matches('}');
+        self.sections
+            .iter()
+            .find(|s| s.path.ends_with(name))
+            .map(|s| s.start)
+    }
+    /// Switch side-by-side display, keeping the top text line in view.
+    pub fn set_sbs(&mut self, on: bool) {
+        if self.sbs == on {
+            return;
+        }
+        let top = self.text_line(self.scroll);
+        self.sbs = on;
+        if self.sbs_text() {
+            self.scroll = (0..self.pairs.len())
+                .find(|&v| self.text_line(v) >= top)
+                .unwrap_or(0);
+        } else if matches!(self.kind, MainKind::Text) {
+            self.scroll = top;
+        }
+        self.scroll_by(0);
     }
     pub fn has_cursor(&self) -> bool {
         !matches!(self.kind, MainKind::Text | MainKind::Empty)
@@ -328,6 +477,8 @@ pub enum Drag {
     SplitV,
     SplitH,
     Scroll(PanelId, Rect),
+    /// Top popup scrollbar: track rect and max scroll offset.
+    PopupScroll(Rect, usize),
     MainSelect(usize),
     Todo(usize),
 }
@@ -340,6 +491,21 @@ pub enum Event {
         result: Result<String, String>,
         then: Then,
     },
+    /// Background syntax highlighting finished (see `App::spawn_highlight`).
+    Highlighted {
+        gen_id: u64,
+        result: Highlighted,
+    },
+}
+
+pub enum HlJob {
+    Rows { rows: Vec<Row>, path: String },
+    Text(String),
+}
+
+pub enum Highlighted {
+    Rows(Vec<Row>),
+    Lines(Vec<Line<'static>>, Vec<DiffSection>),
 }
 
 pub struct App {
@@ -361,11 +527,15 @@ pub struct App {
     pub log_scroll: usize,
     pub show_log: bool,
     pub hits: HitMap,
-    pub left_pct: u16,
+    pub left_width: u16,
     pub log_height: u16,
     pub drag: Option<Drag>,
     pub last_click: Option<(Instant, u16, u16)>,
     pub tx: Sender<Event>,
+    /// Id of the latest background highlight request.
+    pub hl_gen: Arc<AtomicU64>,
+    /// Selection changed by the wheel; preview deferred until the burst is handled.
+    pub preview_pending: bool,
     pub jobs: usize,
     pub spinner: usize,
     pub cherry: Vec<(Oid, String)>,
@@ -373,6 +543,8 @@ pub struct App {
     pub tree_view: bool,
     pub side_by_side: bool,
     pub word_diff: bool,
+    /// Diff with the whole file as context.
+    pub full_file: bool,
     pub force_staged: Option<bool>,
     pub message: Option<(String, Instant, bool)>,
     pub repo_stack: Vec<PathBuf>,
@@ -409,7 +581,7 @@ impl App {
         let mut app = App {
             repo,
             git,
-            theme: Theme::from(&cfg.theme),
+            theme: Theme::from(&cfg),
             keymap,
             data: RepoData::default(),
             focus: PanelId::Files,
@@ -423,18 +595,21 @@ impl App {
             log_scroll: 0,
             show_log: cfg.show_command_log,
             hits: HitMap::default(),
-            left_pct: cfg.left_width_pct.clamp(15, 85),
+            left_width: cfg.left_width.max(20),
             log_height: 7,
             drag: None,
             last_click: None,
             tx,
             jobs: 0,
+            hl_gen: Arc::new(AtomicU64::new(0)),
+            preview_pending: false,
             spinner: 0,
             cherry: vec![],
             collapsed: HashSet::new(),
             tree_view: cfg.tree_view,
             side_by_side: cfg.side_by_side,
-            word_diff: false,
+            word_diff: cfg.word_diff,
+            full_file: false,
             force_staged: None,
             message: None,
             repo_stack: vec![],
@@ -708,6 +883,19 @@ impl App {
     }
 
     pub fn move_sel(&mut self, p: PanelId, delta: isize) {
+        self.move_sel_lazy(p, delta);
+        self.flush_preview();
+    }
+
+    /// Run a preview deferred by `move_sel_lazy`.
+    pub fn flush_preview(&mut self) {
+        if std::mem::take(&mut self.preview_pending) {
+            self.preview();
+        }
+    }
+
+    /// Move the selection; the preview is refreshed by the next `flush_preview`.
+    pub fn move_sel_lazy(&mut self, p: PanelId, delta: isize) {
         let n = self.visible(p).len();
         if n == 0 {
             return;
@@ -723,7 +911,7 @@ impl App {
             self.commit_limit += 300;
             self.refresh();
         }
-        self.preview();
+        self.preview_pending = true;
     }
 
     pub fn set_sel(&mut self, p: PanelId, i: usize) {
@@ -775,11 +963,69 @@ impl App {
     }
 
     pub fn text_view(&self, title: &str, text: &str) -> MainView {
+        let hl_gen = if self.theme.syntax.is_some() && text.contains("diff --git ") {
+            self.spawn_highlight(HlJob::Text(text.to_string()))
+        } else {
+            0
+        };
+        let text_src = text.to_string();
+        let (text, sections) = colorize(text, &self.theme, self.word_diff, false);
         MainView {
             title: title.into(),
             kind: MainKind::Text,
-            text: colorize(text, &self.theme),
+            pairs: text_rows(text.len(), &sections),
+            text,
+            sections,
+            sbs: self.side_by_side,
+            source: text_src,
+            hl_gen,
             ..Default::default()
+        }
+    }
+
+    /// Syntax-highlight a view in a background thread; the result comes back as
+    /// `Event::Highlighted` and is dropped when another view was requested meanwhile.
+    pub fn spawn_highlight(&self, job: HlJob) -> u64 {
+        let gen_id = self.hl_gen.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        let latest = self.hl_gen.clone();
+        let (tx, theme, words) = (self.tx.clone(), self.theme.clone(), self.word_diff);
+        let stale = move || latest.load(AtomicOrdering::SeqCst) != gen_id;
+        std::thread::spawn(move || {
+            // debounce fast selection changes (wheel / held key)
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            if stale() {
+                return;
+            }
+            let result = match job {
+                HlJob::Rows { mut rows, path } => {
+                    highlight::decorate(&mut rows, &path, &theme, words, true);
+                    Highlighted::Rows(rows)
+                }
+                HlJob::Text(t) => {
+                    let (l, s) = colorize(&t, &theme, words, true);
+                    Highlighted::Lines(l, s)
+                }
+            };
+            if !stale() {
+                let _ = tx.send(Event::Highlighted { gen_id, result });
+            }
+        });
+        gen_id
+    }
+
+    pub fn apply_highlight(&mut self, gen_id: u64, result: Highlighted) {
+        if self.main.hl_gen != gen_id {
+            return;
+        }
+        match (&mut self.main.kind, result) {
+            (MainKind::Diff { rows, .. }, Highlighted::Rows(new)) if rows.len() == new.len() => {
+                *rows = new
+            }
+            (MainKind::Text, Highlighted::Lines(l, s)) if l.len() == self.main.text.len() => {
+                self.main.text = l;
+                self.main.sections = s;
+            }
+            _ => {}
         }
     }
 
@@ -940,16 +1186,40 @@ impl App {
     }
 
     pub fn commit_view(&self, rev: &str) -> Result<MainView> {
-        let s = self.git.read(&[
-            "show",
-            "--no-color",
-            "--stat",
-            "-p",
-            "--format=fuller",
-            rev,
-            "--",
-        ])?;
-        Ok(self.text_view(&format!("Commit {}", &rev[..rev.len().min(8)]), &s))
+        let mut args = vec!["show", "--no-color", "--stat", "-p", "--format=fuller"];
+        if self.full_file {
+            args.push("--unified=100000000");
+        }
+        args.extend([rev, "--"]);
+        let s = self.git.read(&args)?;
+        let mut v = self.text_view(&format!("Commit {}", &rev[..rev.len().min(8)]), &s);
+        v.rev = Some(rev.to_string());
+        Ok(v)
+    }
+
+    /// Re-read / re-style the current text view after a display option changed.
+    pub fn reload_text_view(&mut self) {
+        let top = self.main.text_line(self.main.scroll);
+        let file = self.main.section_at(top).map(|s| s.path.clone());
+        let v = match self.main.rev.clone() {
+            Some(rev) => self.commit_view(&rev),
+            None => Ok(self.text_view(&self.main.title, &self.main.source)),
+        };
+        let mut v = match v {
+            Ok(v) => v,
+            Err(e) => return self.show_text("Error", &e.to_string()),
+        };
+        // full context moves lines: keep the same file on top
+        let line = if v.text.len() == self.main.text.len() {
+            top
+        } else {
+            file.and_then(|p| v.sections.iter().find(|s| s.path == p))
+                .map_or(0, |s| s.start)
+        };
+        v.height = self.main.height;
+        v.hscroll = self.main.hscroll;
+        self.main = v;
+        self.main.scroll_to_line(line);
     }
 
     pub fn file_view(&self, idx: usize) -> Result<MainView> {
@@ -975,8 +1245,8 @@ impl App {
         };
         let untracked = f.untracked();
         let mut args: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff"];
-        if self.word_diff {
-            args.push("--word-diff=plain");
+        if self.full_file {
+            args.push("--unified=100000000");
         }
         if untracked {
             args.extend(["--no-index", "--", "/dev/null", &f.path]);
@@ -991,13 +1261,16 @@ impl App {
         }
         let text = self.git.read(&args)?;
         let title = format!("{} {}", if staged { "Staged" } else { "Unstaged" }, f.path);
-        if self.word_diff {
-            let mut v = self.text_view(&title, &text);
-            v.text = word_colorize(&text, &self.theme);
-            return Ok(v);
-        }
         let fd = diff::parse(&text);
-        let rows = fd.rows();
+        let mut rows = fd.rows();
+        highlight::decorate(&mut rows, &f.path, &self.theme, self.word_diff, false);
+        let hl_gen = match &self.theme.syntax {
+            Some(_) => self.spawn_highlight(HlJob::Rows {
+                rows: rows.clone(),
+                path: f.path.clone(),
+            }),
+            None => 0,
+        };
         let mut v = MainView {
             title,
             kind: MainKind::Diff {
@@ -1007,6 +1280,7 @@ impl App {
                 fd,
                 rows,
             },
+            hl_gen,
             ..Default::default()
         };
         // start on first change
@@ -1080,79 +1354,122 @@ impl App {
     }
 }
 
-pub fn colorize(text: &str, theme: &Theme) -> Vec<Line<'static>> {
-    text.lines()
-        .map(|l| {
-            let l = l.replace('\t', "    ");
-            let style = if l.starts_with("+++")
-                || l.starts_with("---")
-                || l.starts_with("diff ")
-                || l.starts_with("index ")
-            {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else if l.starts_with('+') {
-                Style::default().fg(theme.added)
-            } else if l.starts_with('-') {
-                Style::default().fg(theme.removed)
-            } else if l.starts_with("@@") {
-                Style::default().fg(theme.hunk)
-            } else if l.starts_with("commit ") || l.starts_with("stash@") {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::styled(l, style)
-        })
-        .collect()
+/// Style a text view; `diff --git` sections are also returned as decorated rows.
+pub fn colorize(
+    text: &str,
+    theme: &Theme,
+    words: bool,
+    syntax: bool,
+) -> (Vec<Line<'static>>, Vec<DiffSection>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::with_capacity(lines.len());
+    let mut sections = vec![];
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("diff --git ") {
+            // one file section: up to the next `diff --git`
+            let end = (i + 1..lines.len())
+                .find(|&k| lines[k].starts_with("diff --git "))
+                .unwrap_or(lines.len());
+            let section = &lines[i..end];
+            let path = section
+                .iter()
+                .find_map(|l| l.strip_prefix("+++ b/"))
+                .or_else(|| lines[i].rsplit_once(" b/").map(|(_, p)| p))
+                .unwrap_or("");
+            let mut rows = diff::parse(&section.join("\n")).rows();
+            highlight::decorate(&mut rows, path, theme, words, syntax);
+            out.extend(rows.iter().map(|r| highlight::row_line(r, theme)));
+            sections.push(DiffSection {
+                start: i,
+                path: path.to_string(),
+                rows,
+            });
+            i = end;
+            continue;
+        }
+        let l = lines[i].replace('\t', "    ");
+        let style = if l.starts_with("+++")
+            || l.starts_with("---")
+            || l.starts_with("diff ")
+            || l.starts_with("index ")
+        {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else if l.starts_with('+') {
+            Style::default().fg(theme.added)
+        } else if l.starts_with('-') {
+            Style::default().fg(theme.removed)
+        } else if l.starts_with("@@") {
+            Style::default().fg(theme.hunk)
+        } else if l.starts_with("commit ") || l.starts_with("stash@") {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        out.push(Line::styled(l, style));
+        i += 1;
+    }
+    (out, sections)
 }
 
-/// Colorize `--word-diff=plain` output: [-removed-] {+added+}.
-pub fn word_colorize(text: &str, theme: &Theme) -> Vec<Line<'static>> {
-    use ratatui::text::Span;
-    text.lines()
-        .map(|l| {
-            if l.starts_with("@@") {
-                return Line::styled(l.to_string(), Style::default().fg(theme.hunk));
-            }
-            let mut spans = Vec::new();
-            let mut rest = l;
-            while !rest.is_empty() {
-                let next = [rest.find("[-"), rest.find("{+")]
-                    .into_iter()
-                    .flatten()
-                    .min();
-                match next {
-                    Some(i) => {
-                        spans.push(Span::raw(rest[..i].to_string()));
-                        let (close, style) = if rest[i..].starts_with("[-") {
-                            (
-                                "-]",
-                                Style::default()
-                                    .fg(theme.removed)
-                                    .add_modifier(Modifier::CROSSED_OUT),
-                            )
-                        } else {
-                            (
-                                "+}",
-                                Style::default()
-                                    .fg(theme.added)
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        };
-                        let body = &rest[i + 2..];
-                        let end = body.find(close).unwrap_or(body.len());
-                        spans.push(Span::styled(body[..end].to_string(), style));
-                        rest = body.get(end + 2..).unwrap_or("");
-                    }
-                    None => {
-                        spans.push(Span::raw(rest.to_string()));
-                        rest = "";
-                    }
-                }
-            }
-            Line::from(spans)
-        })
-        .collect()
+#[cfg(test)]
+mod colorize_tests {
+    use super::*;
+
+    #[test]
+    fn commit_view_diff_is_decorated() {
+        let theme = Theme::from(&Config::default());
+        let text = "commit abc\nAuthor: x\n\ndiff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-let a = 1;\n+let a = 2;\n";
+        let (lines, sections) = colorize(text, &theme, true, true);
+        assert_eq!(lines.len(), text.lines().count());
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].start, 3);
+        assert_eq!(sections[0].path, "f.rs");
+        assert_eq!(sections[0].start + sections[0].rows.len(), lines.len());
+        let pairs = text_rows(lines.len(), &sections);
+        assert_eq!(
+            pairs[..3],
+            [TextRow::Line(0), TextRow::Line(1), TextRow::Line(2)]
+        );
+        assert_eq!(*pairs.last().unwrap(), TextRow::Pair(0, Some(4), Some(5)));
+        let add = lines.last().unwrap();
+        assert_eq!(add.style.bg, Some(theme.added_bg));
+        assert!(
+            add.spans
+                .iter()
+                .any(|s| s.style.bg == Some(theme.added_word_bg))
+        );
+        let flat: String = add.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(flat, "+let a = 2;");
+    }
+
+    #[test]
+    fn text_view_navigation() {
+        let theme = Theme::from(&Config::default());
+        let text = "commit abc\n\n a.rs | 2 +-\n .../b.rs | 1 +\n\n\
+diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n@@ -9 +9 @@\n-z\n+w\n\
+diff --git a/d/b.rs b/d/b.rs\n--- a/d/b.rs\n+++ b/d/b.rs\n@@ -1 +1,2 @@\n a\n+b\n";
+        let (text, sections) = colorize(text, &theme, false, false);
+        let mut v = MainView {
+            kind: MainKind::Text,
+            pairs: text_rows(text.len(), &sections),
+            text,
+            sections,
+            height: 3,
+            ..Default::default()
+        };
+        assert_eq!(v.stat_target(2), Some(5));
+        assert_eq!(v.stat_target(3), Some(14));
+        assert_eq!(v.text_jump(true, false), Some(5));
+        assert_eq!(v.text_jump(true, true), Some(8));
+        v.scroll_to_line(7);
+        assert_eq!(v.text_jump(true, true), Some(11));
+        assert_eq!(v.text_jump(false, false), Some(5));
+        v.set_sbs(true);
+        assert_eq!(v.text_line(v.scroll), 7);
+        v.scroll_to_line(14);
+        assert_eq!(v.text_line(v.scroll), 14);
+    }
 }

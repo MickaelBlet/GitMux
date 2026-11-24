@@ -17,6 +17,12 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 impl App {
     pub fn handle(&mut self, ev: Event) {
+        // a deferred preview must be up to date before anything but more wheel events
+        let wheel = matches!(&ev, Event::Term(TermEvent::Mouse(m))
+            if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown));
+        if !wheel && !matches!(ev, Event::Tick) {
+            self.flush_preview();
+        }
         match ev {
             Event::Term(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => self.on_key(k),
             Event::Term(TermEvent::Mouse(m)) => self.on_mouse(m),
@@ -29,6 +35,7 @@ impl App {
                 result,
                 then,
             } => self.job_done(label, result, then),
+            Event::Highlighted { gen_id, result } => self.apply_highlight(gen_id, result),
         }
     }
 
@@ -81,6 +88,8 @@ impl App {
     // ---------------- keyboard ----------------
 
     fn on_key(&mut self, k: KeyEvent) {
+        // keyboard use hides the mouse hover (and the commit tooltip)
+        self.hover = None;
         if !self.popups.is_empty() {
             return self.popup_key(k);
         }
@@ -349,6 +358,7 @@ impl App {
         matches!(
             h,
             Hit::Popup
+                | Hit::PopupScrollbar(_)
                 | Hit::MenuItem(_)
                 | Hit::Button(_)
                 | Hit::TodoRow(_)
@@ -394,6 +404,10 @@ impl App {
             Hit::Scrollbar(p) => {
                 self.drag = Some(Drag::Scroll(p, rect));
                 self.scroll_to(p, rect, y);
+            }
+            Hit::PopupScrollbar(max) => {
+                self.drag = Some(Drag::PopupScroll(rect, max));
+                self.popup_scroll_to(rect, max, y);
             }
             Hit::SplitV => self.drag = Some(Drag::SplitV),
             Hit::SplitH => self.drag = Some(Drag::SplitH),
@@ -463,6 +477,11 @@ impl App {
                 self.pick_conflict(pick, Some(i));
             }
             MainKind::Blame { .. } | MainKind::History { .. } => self.main_enter(),
+            MainKind::Text => {
+                if let Some(l) = self.main.stat_target(i) {
+                    self.main.scroll_to_line(l);
+                }
+            }
             _ => {}
         }
     }
@@ -500,8 +519,7 @@ impl App {
         let Some(d) = self.drag else { return };
         match d {
             Drag::SplitV => {
-                let w = self.screen.width.max(1) as u32;
-                self.left_pct = ((x as u32 * 100 / w) as u16).clamp(15, 85);
+                self.left_width = x.clamp(20, self.screen.width.saturating_sub(10).max(20));
             }
             Drag::SplitH => {
                 let bottom = self.screen.height.saturating_sub(1);
@@ -510,6 +528,7 @@ impl App {
                     .clamp(3, bottom.saturating_sub(5).max(3));
             }
             Drag::Scroll(p, r) => self.scroll_to(p, r, y),
+            Drag::PopupScroll(r, max) => self.popup_scroll_to(r, max, y),
             Drag::MainSelect(start) => {
                 let r = self.main_rect;
                 if y < r.y {
@@ -555,6 +574,14 @@ impl App {
         }
     }
 
+    fn popup_scroll_to(&mut self, r: ratatui::layout::Rect, max: usize, y: u16) {
+        let frac = (y.saturating_sub(r.y) as f64 / (r.height.max(2) - 1) as f64).clamp(0.0, 1.0);
+        if let Some(Popup::Help { scroll } | Popup::Message { scroll, .. }) = self.popups.last_mut()
+        {
+            *scroll = (frac * max as f64).round() as usize;
+        }
+    }
+
     fn wheel(&mut self, x: u16, y: u16, d: isize, shift: bool) {
         if let Some(top) = self.popups.last_mut() {
             match top {
@@ -583,7 +610,7 @@ impl App {
                 }
             }
             Some(PanelId::Log) => self.log_scroll = (self.log_scroll as isize - d).max(0) as usize,
-            Some(p) => self.move_sel(p, d.signum()),
+            Some(p) => self.move_sel_lazy(p, d.signum()),
             None => {}
         }
     }
@@ -600,6 +627,8 @@ impl App {
             Btn::StageView => self.dispatch(Action::ToggleStagedView),
             Btn::SideBySide => self.dispatch(Action::SideBySide),
             Btn::WordDiff => self.dispatch(Action::WordDiff),
+            Btn::FullFile => self.dispatch(Action::FullFile),
+            Btn::StickyFile(l) => self.main.scroll_to_line(l),
             Btn::TodoUp => self.todo_move(-1),
             Btn::TodoDown => self.todo_move(1),
         }

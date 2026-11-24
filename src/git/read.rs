@@ -56,7 +56,12 @@ pub struct CommitInfo {
     pub short: String,
     pub summary: String,
     pub author: String,
+    pub email: String,
+    /// Full commit message.
+    pub message: String,
     pub time: i64,
+    /// Commit timezone offset, in minutes.
+    pub tz: i32,
     pub parents: Vec<Oid>,
     pub refs: Vec<String>,
 }
@@ -326,7 +331,10 @@ pub fn commits(
             short: id.to_string()[..8].to_string(),
             summary: c.summary().ok().flatten().unwrap_or("").to_string(),
             author: c.author().name().unwrap_or("").to_string(),
+            email: c.author().email().unwrap_or("").to_string(),
+            message: c.message().unwrap_or("").trim_end().to_string(),
             time: c.time().seconds(),
+            tz: c.time().offset_minutes(),
             parents: c.parent_ids().collect(),
             refs: refs.get(&id).cloned().unwrap_or_default(),
         });
@@ -527,6 +535,31 @@ pub fn blame(repo: &Repository, path: &str) -> Result<Vec<(Oid, String, String, 
     Ok(out)
 }
 
+/// Absolute date `YYYY-MM-DD HH:MM +HHMM` in the given timezone offset (minutes).
+pub fn format_time(t: i64, tz: i32) -> String {
+    let local = t + tz as i64 * 60;
+    let (days, secs) = (local.div_euclid(86400), local.rem_euclid(86400));
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let sign = if tz < 0 { '-' } else { '+' };
+    let a = tz.abs();
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} {sign}{:02}{:02}",
+        secs / 3600,
+        secs % 3600 / 60,
+        a / 60,
+        a % 60
+    )
+}
+
 pub fn relative_time(t: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -546,6 +579,13 @@ pub fn relative_time(t: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_time_civil() {
+        assert_eq!(format_time(0, 0), "1970-01-01 00:00 +0000");
+        assert_eq!(format_time(951782400, 60), "2000-02-29 01:00 +0100");
+        assert_eq!(format_time(1700000000, -300), "2023-11-14 17:13 -0500");
+    }
     use crate::git::{Git, diff};
     use std::collections::BTreeSet;
 

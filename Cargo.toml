@@ -10,6 +10,8 @@ directories = "6.0.0"
 git2 = { version = "0.21.0", default-features = false }
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
+similar = "3.2.1"
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy", "parsing"] }
 toml = "1.2.2"
 unicode-width = "0.2.3"
 

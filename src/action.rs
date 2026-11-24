@@ -127,8 +127,11 @@ actions! {
     ToggleStagedView => "toggle staged / unstaged",
     SideBySide => "side-by-side view",
     WordDiff => "word diff",
+    FullFile => "show whole file",
     NextHunk => "next hunk",
     PrevHunk => "prev hunk",
+    NextFile => "next file",
+    PrevFile => "prev file",
     ScrollLeft => "scroll left",
     ScrollRight => "scroll right",
     // conflict

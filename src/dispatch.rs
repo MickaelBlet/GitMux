@@ -821,9 +821,31 @@ impl App {
                 }
             }
             SideBySide => self.side_by_side = !self.side_by_side,
+            FullFile => {
+                self.full_file = !self.full_file;
+                match self.main.kind {
+                    MainKind::Text if self.main.rev.is_some() => self.reload_text_view(),
+                    MainKind::Text => {}
+                    _ => self.reload_main_file(),
+                }
+            }
             WordDiff => {
                 self.word_diff = !self.word_diff;
-                self.reload_main_file();
+                if matches!(self.main.kind, MainKind::Text) {
+                    self.reload_text_view();
+                } else {
+                    self.reload_main_file();
+                }
+            }
+            NextFile | PrevFile => {
+                if let Some(l) = self.main.text_jump(a == NextFile, false) {
+                    self.main.scroll_to_line(l);
+                }
+            }
+            NextHunk | PrevHunk if matches!(self.main.kind, MainKind::Text) => {
+                if let Some(l) = self.main.text_jump(a == NextHunk, true) {
+                    self.main.scroll_to_line(l.saturating_sub(1));
+                }
             }
             NextHunk | PrevHunk => {
                 if let MainKind::Diff { rows, .. } = &self.main.kind {

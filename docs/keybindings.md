@@ -183,7 +183,8 @@ The config section name (see [configuration](configuration.md)) and the action n
 | `d` | discard hunk or lines | `DiscardSelection` |
 | `s` | toggle staged / unstaged | `ToggleStagedView` |
 | `\|` | side-by-side view | `SideBySide` |
-| `w` | word diff | `WordDiff` |
+| `w` | toggle changed-word highlighting | `WordDiff` |
+| `F` | show whole file (full context) | `FullFile` |
 | `n` | next hunk | `NextHunk` |
 | `N` | prev hunk | `PrevHunk` |
 | `e` | open in $EDITOR | `EditFile` |
@@ -196,6 +197,17 @@ The config section name (see [configuration](configuration.md)) and the action n
 | --- | --- | --- |
 | `left` | scroll left | `ScrollLeft` |
 | `right` | scroll right | `ScrollRight` |
+| `\|` | side-by-side view (commit / stash diffs) | `SideBySide` |
+| `w` | toggle changed-word highlighting | `WordDiff` |
+| `F` | full context (commit view) | `FullFile` |
+| `n` | next hunk | `NextHunk` |
+| `N` | prev hunk | `PrevHunk` |
+| `}` | next file | `NextFile` |
+| `{` | prev file | `PrevFile` |
+
+In commit / stash views the file being read stays pinned on the first row; click
+it to jump back to the start of that file. Double-click a `--stat` line to jump
+to its diff.
 
 ## Main view: conflict (`conflict`)
 

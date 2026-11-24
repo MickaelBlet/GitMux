@@ -5,6 +5,7 @@ mod clipboard;
 mod config;
 mod dispatch;
 mod git;
+mod highlight;
 mod input;
 mod keymap;
 mod ops;
@@ -148,6 +149,7 @@ fn run(
     paused: &AtomicBool,
 ) -> Result<()> {
     while !app.quit {
+        app.flush_preview();
         terminal.draw(|f| ui::draw(f, app))?;
         let ev = rx.recv()?;
         app.handle(ev);

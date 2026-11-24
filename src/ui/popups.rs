@@ -90,6 +90,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// Write back the clamped scroll offset of the top popup, so scrolling past
+/// the end does not accumulate.
+fn set_popup_scroll(app: &mut App, s: usize) {
+    if let Some(Popup::Help { scroll } | Popup::Message { scroll, .. }) = app.popups.last_mut() {
+        *scroll = s;
+    }
+}
+
 fn draw_one(f: &mut Frame, app: &mut App, area: Rect, p: &Popup, top: bool) {
     match p {
         Popup::Confirm { title, msg, .. } => {
@@ -263,7 +271,22 @@ fn draw_one(f: &mut Frame, app: &mut App, area: Rect, p: &Popup, top: bool) {
             let r = centered(area, 80, area.height.saturating_sub(4));
             let inner = frame(f, app, r, "Help — keys (esc to close)", FOCUS);
             let h = inner.height as usize;
-            let s = (*scroll).min(lines.len().saturating_sub(h));
+            let len = lines.len();
+            let max = len.saturating_sub(h);
+            let s = (*scroll).min(max);
+            if top {
+                set_popup_scroll(app, s);
+                super::scrollbar_with(
+                    f,
+                    app,
+                    Hit::PopupScrollbar(max),
+                    Style::default().fg(FOCUS),
+                    r,
+                    len,
+                    s,
+                    h,
+                );
+            }
             for (i, l) in lines.into_iter().skip(s).take(h).enumerate() {
                 f.buffer_mut().set_line(
                     inner.x + 1,
@@ -292,6 +315,9 @@ fn draw_one(f: &mut Frame, app: &mut App, area: Rect, p: &Popup, top: bool) {
             let inner = frame(f, app, r, title, color);
             let h = inner.height.saturating_sub(1) as usize;
             let s = (*scroll).min(lines.len().saturating_sub(h));
+            if top {
+                set_popup_scroll(app, s);
+            }
             for (i, l) in lines.iter().skip(s).take(h).enumerate() {
                 f.buffer_mut().set_stringn(
                     inner.x + 1,

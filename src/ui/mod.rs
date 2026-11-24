@@ -4,9 +4,10 @@ pub mod hit;
 pub mod icons;
 mod popups;
 
-use crate::app::{App, FileRow, MainKind, PanelId};
+use crate::app::{App, Drag, FileRow, MainKind, PanelId, TextRow};
 use crate::git::diff::{self, RowKind};
-use crate::git::read::relative_time;
+use crate::git::read::{format_time, relative_time};
+use crate::highlight;
 use hit::{Btn, Hit};
 use icons::Icons;
 use ratatui::Frame;
@@ -21,6 +22,8 @@ use unicode_width::UnicodeWidthStr;
 
 pub const FOCUS: Color = Color::LightBlue;
 pub const PILL_BG: Color = Color::Indexed(238);
+/// Color of a hovered / dragged scrollbar or splitter.
+pub const GRAB: Color = Color::Yellow;
 const LANE_COLORS: [Color; 6] = [
     Color::LightBlue,
     Color::LightMagenta,
@@ -98,9 +101,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.screen = area;
     let [body, bar] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
-    let left_w = (body.width as u32 * app.left_pct as u32 / 100) as u16;
+    let left_w = app.left_width.min(body.width.saturating_sub(10)).max(20);
     let [left, right] =
-        Layout::horizontal([Constraint::Length(left_w.max(20)), Constraint::Min(10)]).areas(body);
+        Layout::horizontal([Constraint::Length(left_w), Constraint::Min(10)]).areas(body);
 
     // left column: status (fixed) + 4 panels, focused one larger
     let weight = |p: PanelId| {
@@ -118,8 +121,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Fill(weight(PanelId::Stash) - 1),
     ])
     .split(left);
+    let mut tip = None;
     for (i, p) in PanelId::LEFT.iter().enumerate() {
-        draw_list(f, app, *p, rows[i]);
+        if let Some(h) = draw_list(f, app, *p, rows[i]) {
+            tip = Some(h);
+        }
     }
 
     let log_h = if app.show_log {
@@ -133,16 +139,146 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_main(f, app, main_area);
     if log_h > 0 {
         draw_log(f, app, log_area);
-        app.hits.push(
-            Rect::new(log_area.x, log_area.y, log_area.width, 1),
-            Hit::SplitH,
-        );
+        let r = Rect::new(log_area.x, log_area.y, log_area.width, 1);
+        if splitter_hot(app, r, Drag::SplitH) {
+            paint_fg(f, r, GRAB);
+        }
+        app.hits.push(r, Hit::SplitH);
     }
     // vertical splitter on the main panel's left border
-    app.hits
-        .push(Rect::new(right.x, right.y, 1, right.height), Hit::SplitV);
+    let r = Rect::new(right.x, right.y, 1, right.height);
+    if splitter_hot(app, r, Drag::SplitV) {
+        paint_fg(f, r, GRAB);
+    }
+    app.hits.push(r, Hit::SplitV);
     draw_bar(f, app, bar);
+    if let Some((idx, row)) = tip
+        && app.popups.is_empty()
+        && app.drag.is_none()
+    {
+        draw_commit_tip(f, app, idx, row);
+    }
     popups::draw(f, app, area);
+}
+
+/// Whether a splitter is being dragged, or hovered with nothing else going on.
+fn splitter_hot(app: &App, r: Rect, kind: Drag) -> bool {
+    match app.drag {
+        Some(d) => std::mem::discriminant(&d) == std::mem::discriminant(&kind),
+        None => app.popups.is_empty() && hovered(app, r),
+    }
+}
+
+/// Recolor the foreground of every cell in `r`.
+fn paint_fg(f: &mut Frame, r: Rect, fg: Color) {
+    let r = r.intersection(f.area());
+    f.buffer_mut().set_style(r, Style::default().fg(fg));
+}
+
+/// Tooltip with the full details of the hovered commit, below (or above) its row.
+fn draw_commit_tip(f: &mut Frame, app: &App, idx: usize, row: Rect) {
+    let Some(c) = app.data.commits.get(idx) else {
+        return;
+    };
+    let Some((mx, _)) = app.hover else { return };
+    let area = f.area();
+    let key = Style::default().fg(app.theme.dim);
+    let field = |k: &'static str, v: String, st: Style| {
+        Line::from(vec![
+            Span::styled(format!("{k:<8}"), key),
+            Span::styled(v, st),
+        ])
+    };
+    let mut lines = vec![
+        field(
+            "Commit",
+            c.oid.to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
+        field(
+            "Author",
+            if c.email.is_empty() {
+                c.author.clone()
+            } else {
+                format!("{} <{}>", c.author, c.email)
+            },
+            Style::default(),
+        ),
+        field(
+            "Date",
+            format!(
+                "{} ({} ago)",
+                format_time(c.time, c.tz),
+                relative_time(c.time)
+            ),
+            Style::default(),
+        ),
+    ];
+    if !c.refs.is_empty() {
+        lines.push(field(
+            "Refs",
+            c.refs.join(", "),
+            Style::default().fg(app.theme.accent),
+        ));
+    }
+    if !c.parents.is_empty() {
+        let p: Vec<String> = c
+            .parents
+            .iter()
+            .map(|o| o.to_string()[..8].to_string())
+            .collect();
+        lines.push(field(
+            "Parents",
+            p.join(" "),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    lines.push(Line::default());
+    const MAX_MSG: usize = 20;
+    let msg: Vec<&str> = c.message.lines().collect();
+    for (i, l) in msg.iter().take(MAX_MSG).enumerate() {
+        let st = if i == 0 {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(l.to_string(), st)));
+    }
+    if msg.len() > MAX_MSG {
+        lines.push(Line::from(Span::styled("…", key)));
+    }
+
+    let content_w = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let w = (content_w + 4).min(area.width.saturating_sub(2)).min(100);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    if w < 10 || h < 3 {
+        return;
+    }
+    let x = mx.saturating_add(2).min(area.right().saturating_sub(w));
+    let y = if row.bottom() + h <= area.bottom() {
+        row.bottom()
+    } else if row.y >= area.y + h {
+        row.y - h
+    } else {
+        area.bottom().saturating_sub(h)
+    };
+    let r = Rect::new(x, y, w, h);
+    f.render_widget(ratatui::widgets::Clear, r);
+    let b = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.dim));
+    let inner = b.inner(r);
+    f.render_widget(b, r);
+    let buf = f.buffer_mut();
+    for (i, l) in lines.iter().enumerate().take(inner.height as usize) {
+        buf.set_line(
+            inner.x + 1,
+            inner.y + i as u16,
+            l,
+            inner.width.saturating_sub(2),
+        );
+    }
 }
 
 fn tab_title(f: &mut Frame, app: &mut App, p: PanelId, area: Rect, focused: bool) {
@@ -205,10 +341,37 @@ fn scrollbar(
     view: usize,
     focused: bool,
 ) {
+    let style = border_style(app, focused);
+    scrollbar_with(f, app, Hit::Scrollbar(p), style, area, len, pos, view);
+}
+
+/// Vertical scrollbar on the right border of `area`, clickable as `hit`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn scrollbar_with(
+    f: &mut Frame,
+    app: &mut App,
+    hit: Hit,
+    style: Style,
+    area: Rect,
+    len: usize,
+    pos: usize,
+    view: usize,
+) {
     if len <= view || area.height < 3 {
         return;
     }
     let r = Rect::new(area.right() - 1, area.y + 1, 1, area.height - 2);
+    let dragged = match app.drag {
+        Some(Drag::Scroll(_, d) | Drag::PopupScroll(d, _)) => d == r,
+        _ => false,
+    };
+    // panel scrollbars are under any open popup
+    let reachable = !matches!(hit, Hit::Scrollbar(_)) || app.popups.is_empty();
+    let style = if dragged || (app.drag.is_none() && reachable && hovered(app, r)) {
+        style.fg(GRAB)
+    } else {
+        style
+    };
     let mut st = ScrollbarState::new(len.saturating_sub(view))
         .position(pos)
         .viewport_content_length(view);
@@ -217,16 +380,13 @@ fn scrollbar(
         .end_symbol(None)
         .track_symbol(Some("│"))
         .thumb_symbol("┃")
-        .style(border_style(app, focused))
-        .render(
-            Rect::new(area.right() - 1, area.y + 1, 1, area.height - 2),
-            f.buffer_mut(),
-            &mut st,
-        );
-    app.hits.push(r, Hit::Scrollbar(p));
+        .style(style)
+        .render(r, f.buffer_mut(), &mut st);
+    app.hits.push(r, hit);
 }
 
-fn draw_list(f: &mut Frame, app: &mut App, p: PanelId, area: Rect) {
+/// Returns the hovered commit (index, row rect) of the commit log, if any.
+fn draw_list(f: &mut Frame, app: &mut App, p: PanelId, area: Rect) -> Option<(usize, Rect)> {
     let focused = app.focus == p;
     let block = panel_block(app, focused);
     let inner = block.inner(area);
@@ -255,6 +415,8 @@ fn draw_list(f: &mut Frame, app: &mut App, p: PanelId, area: Rect) {
         let l = app.list(p);
         (l.sel, l.off, l.filter.clone())
     };
+    let commit_log = p == PanelId::Commits && app.tabs[p.index()] == 0;
+    let mut tip = None;
     for (row, &idx) in vis.iter().enumerate().skip(off).take(h) {
         let y = inner.y + (row - off) as u16;
         let r = Rect::new(inner.x, y, inner.width, 1);
@@ -272,6 +434,9 @@ fn draw_list(f: &mut Frame, app: &mut App, p: PanelId, area: Rect) {
         }
         buf.set_line(r.x, r.y, &line, r.width);
         app.hits.push(r, Hit::Row(p, row));
+        if commit_log && hovered(app, r) {
+            tip = Some((idx, r));
+        }
     }
     if vis.is_empty() && h > 0 {
         let msg = if filter.is_empty() {
@@ -301,6 +466,7 @@ fn draw_list(f: &mut Frame, app: &mut App, p: PanelId, area: Rect) {
             .set_string(x, area.bottom() - 1, &footer, border_style(app, focused));
     }
     scrollbar(f, app, p, area, vis.len(), off, h, focused);
+    tip
 }
 
 fn empty_msg(app: &App, p: PanelId) -> &'static str {
@@ -572,21 +738,122 @@ fn row_line(app: &App, p: PanelId, idx: usize, file_rows: &[FileRow]) -> Line<'s
 }
 
 fn diff_style(kind: RowKind, app: &App) -> Style {
-    match kind {
-        RowKind::Header => Style::default().add_modifier(Modifier::BOLD),
-        RowKind::HunkHeader => Style::default().fg(app.theme.hunk),
-        RowKind::Add => Style::default().fg(app.theme.added),
-        RowKind::Del => Style::default().fg(app.theme.removed),
-        RowKind::Context => Style::default(),
-        RowKind::NoNewline => Style::default().fg(app.theme.dim),
-    }
+    highlight::row_style(kind, &app.theme)
+}
+
+/// Width of the line-number gutter for a diff.
+fn gutter_width(rows: &[diff::Row]) -> usize {
+    rows.iter()
+        .filter_map(|r| r.old_no.max(r.new_no))
+        .max()
+        .map_or(1, |n| n.to_string().len())
+        .max(3)
+}
+
+fn line_no(n: Option<usize>, w: usize) -> String {
+    n.map_or_else(|| " ".repeat(w), |n| format!("{n:>w$}"))
 }
 
 fn clip(s: &str, h: usize) -> String {
     s.replace('\t', "    ").chars().skip(h).collect()
 }
 
+/// One side-by-side diff row: headers span the full width, otherwise old | new.
+#[allow(clippy::too_many_arguments)]
+fn draw_pair(
+    buf: &mut Buffer,
+    app: &App,
+    rows: &[diff::Row],
+    (l, r): (Option<usize>, Option<usize>),
+    area: Rect,
+    nw: usize,
+    hs: usize,
+    sel_bg: impl Fn(usize) -> Option<Color>,
+) {
+    let y = area.y;
+    if let (Some(li), true) = (l, l == r)
+        && matches!(rows[li].kind, RowKind::Header | RowKind::HunkHeader)
+    {
+        let row = &rows[li];
+        let mut st = diff_style(row.kind, app);
+        if let Some(bg) = sel_bg(li) {
+            st = st.bg(bg);
+            buf.set_style(area, st);
+        }
+        buf.set_stringn(area.x, y, clip(&row.text, hs), area.width as usize, st);
+        return;
+    }
+    let half = area.width / 2;
+    for (side, left, x, w) in [
+        (l, true, area.x, half.saturating_sub(1)),
+        (r, false, area.x + half, area.width - half),
+    ] {
+        let Some(ri) = side else {
+            buf.set_style(
+                Rect::new(x, y, w, 1),
+                Style::default().bg(Color::Indexed(234)),
+            );
+            continue;
+        };
+        let row = &rows[ri];
+        let bg = sel_bg(ri).or_else(|| highlight::row_bg(row.kind, &app.theme));
+        buf.set_style(
+            Rect::new(x, y, w, 1),
+            Style::default().bg(bg.unwrap_or(Color::Reset)),
+        );
+        let no = if left { row.old_no } else { row.new_no };
+        let mut spans = vec![Span::styled(
+            format!("{} ", line_no(no, nw)),
+            Style::default().fg(app.theme.dim),
+        )];
+        spans.extend(highlight::clip_spans(
+            highlight::row_spans(row, &app.theme),
+            hs,
+        ));
+        buf.set_line(x, y, &Line::from(spans), w);
+    }
+    buf.set_string(
+        area.x + half - 1,
+        y,
+        "│",
+        Style::default().fg(app.theme.border),
+    );
+}
+
+/// Pin the file of the diff section scrolled past on the first row of a text view.
+fn draw_sticky(f: &mut Frame, app: &mut App, inner: Rect) {
+    if inner.height < 2 {
+        return;
+    }
+    let top = app.main.text_line(app.main.scroll);
+    let Some(sec) = app.main.section_at(top) else {
+        return;
+    };
+    if top == sec.start {
+        return;
+    }
+    let (start, path) = (sec.start, sec.path.clone());
+    let r = Rect::new(inner.x, inner.y, inner.width, 1);
+    let st = Style::default()
+        .fg(app.theme.accent)
+        .bg(Color::Indexed(237))
+        .add_modifier(Modifier::BOLD);
+    let buf = f.buffer_mut();
+    // overwrite the whole row: the line underneath must not show through
+    buf.set_string(r.x, r.y, " ".repeat(r.width as usize), st);
+    buf.set_stringn(
+        r.x,
+        r.y,
+        format!(" {}{}", icons(app).file, path),
+        r.width as usize,
+        st,
+    );
+    app.hits.push(r, Hit::Button(Btn::StickyFile(start)));
+}
+
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
+    let sbs = app.side_by_side;
+    app.main.set_sbs(sbs);
     let focused = app.focus == PanelId::Main;
     let block = panel_block(app, focused);
     let inner = block.inner(area);
@@ -624,9 +891,20 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
                 app.side_by_side,
             ));
             btns.push(("word".into(), Hit::Button(Btn::WordDiff), app.word_diff));
+            if !*untracked {
+                btns.push(("full".into(), Hit::Button(Btn::FullFile), app.full_file));
+            }
         }
-        MainKind::Text if app.word_diff && app.main.title.contains("staged") => {
-            btns.push(("word".into(), Hit::Button(Btn::WordDiff), true));
+        MainKind::Text if !app.main.sections.is_empty() => {
+            btns.push((
+                "side-by-side".into(),
+                Hit::Button(Btn::SideBySide),
+                app.side_by_side,
+            ));
+            btns.push(("word".into(), Hit::Button(Btn::WordDiff), app.word_diff));
+            if app.main.rev.is_some() {
+                btns.push(("full".into(), Hit::Button(Btn::FullFile), app.full_file));
+            }
         }
         MainKind::Conflict { .. } => {
             btns.push((
@@ -684,65 +962,57 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
                 .saturating_sub(h / 2)
                 .min(pairs.len().saturating_sub(h)),
         );
-        let half = inner.width / 2;
+        let nw = gutter_width(rows);
         let mut hits = vec![];
+        let sel_bg = |i: usize| {
+            (i >= sel_a && i <= sel_b).then_some(if i == cur { cursor_bg } else { range_bg })
+        };
         for (i, (l, r)) in pairs.iter().enumerate().skip(start).take(h) {
-            let y = inner.y + (i - start) as u16;
-            let buf = f.buffer_mut();
-            // file / hunk headers span the full width
-            if let (Some(li), true) = (l, l == r)
-                && matches!(rows[*li].kind, RowKind::Header | RowKind::HunkHeader)
-            {
-                let row = &rows[*li];
-                let mut st = diff_style(row.kind, app);
-                if *li >= sel_a && *li <= sel_b {
-                    st = st.bg(if *li == cur { cursor_bg } else { range_bg });
-                    buf.set_style(Rect::new(inner.x, y, inner.width, 1), st);
-                }
-                buf.set_stringn(inner.x, y, clip(&row.text, hs), inner.width as usize, st);
-                hits.push((Rect::new(inner.x, y, inner.width, 1), *li));
-                continue;
-            }
-            for (side, x, w) in [
-                (l, inner.x, half.saturating_sub(1)),
-                (r, inner.x + half, inner.width - half),
-            ] {
-                let Some(ri) = side else {
-                    buf.set_style(
-                        Rect::new(x, y, w, 1),
-                        Style::default().bg(Color::Indexed(234)),
-                    );
-                    continue;
-                };
-                let row = &rows[*ri];
-                let mut st = diff_style(row.kind, app);
-                if *ri >= sel_a && *ri <= sel_b {
-                    st = st.bg(if *ri == cur { cursor_bg } else { range_bg });
-                }
-                let text = match row.kind {
-                    RowKind::Add | RowKind::Del | RowKind::Context => {
-                        clip(row.text.get(1..).unwrap_or(""), hs)
-                    }
-                    _ => clip(&row.text, hs),
-                };
-                buf.set_style(
-                    Rect::new(x, y, w, 1),
-                    Style::default().bg(st.bg.unwrap_or(Color::Reset)),
-                );
-                buf.set_stringn(x, y, text, w as usize, st);
-            }
-            buf.set_string(
-                inner.x + half - 1,
-                y,
-                "│",
-                Style::default().fg(app.theme.border),
-            );
-            hits.push((Rect::new(inner.x, y, inner.width, 1), l.or(*r).unwrap_or(0)));
+            let row = Rect::new(inner.x, inner.y + (i - start) as u16, inner.width, 1);
+            draw_pair(f.buffer_mut(), app, rows, (*l, *r), row, nw, hs, sel_bg);
+            hits.push((row, l.or(*r).unwrap_or(0)));
         }
         for (r, i) in hits {
             app.hits.push(r, Hit::MainLine(i));
         }
         scrollbar(f, app, PanelId::Main, area, pairs.len(), start, h, focused);
+        return;
+    }
+
+    // side-by-side commit / stash text
+    if app.main.sbs_text() {
+        let scroll = app.main.scroll;
+        let mut hits = vec![];
+        let gutters: Vec<usize> = app
+            .main
+            .sections
+            .iter()
+            .map(|s| gutter_width(&s.rows))
+            .collect();
+        for (i, tr) in app.main.pairs.iter().enumerate().skip(scroll).take(h) {
+            let r = Rect::new(inner.x, inner.y + (i - scroll) as u16, inner.width, 1);
+            let buf = f.buffer_mut();
+            match *tr {
+                TextRow::Line(li) => {
+                    let mut line = app.main.text[li].clone();
+                    if let Some(bg) = line.style.bg.take() {
+                        buf.set_style(r, Style::default().bg(bg));
+                    }
+                    line.spans = highlight::clip_spans(line.spans, hs);
+                    buf.set_line(r.x, r.y, &line, r.width);
+                }
+                TextRow::Pair(si, l, rr) => {
+                    let rows = &app.main.sections[si].rows;
+                    draw_pair(buf, app, rows, (l, rr), r, gutters[si], hs, |_| None);
+                }
+            }
+            hits.push((r, app.main.text_line(i)));
+        }
+        for (r, i) in hits {
+            app.hits.push(r, Hit::MainLine(i));
+        }
+        draw_sticky(f, app, inner);
+        scrollbar(f, app, PanelId::Main, area, len, scroll, h, focused);
         return;
     }
 
@@ -752,16 +1022,47 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     match &app.main.kind {
         MainKind::Empty => {}
         MainKind::Text => {
-            for l in app.main.text.iter().skip(scroll).take(h) {
-                lines.push((l.clone(), Style::default()));
+            let dim = Style::default().fg(app.theme.dim);
+            let gutters: Vec<usize> = app
+                .main
+                .sections
+                .iter()
+                .map(|s| gutter_width(&s.rows))
+                .collect();
+            for (i, l) in app.main.text.iter().enumerate().skip(scroll).take(h) {
+                let mut l = l.clone();
+                l.spans = highlight::clip_spans(l.spans, hs);
+                // diff lines get the old / new line-number gutter
+                if let Some((si, sec)) = app
+                    .main
+                    .sections
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| i >= s.start && i < s.start + s.rows.len())
+                {
+                    let (r, nw) = (&sec.rows[i - sec.start], gutters[si]);
+                    l.spans.insert(
+                        0,
+                        Span::styled(
+                            format!("{} {} │", line_no(r.old_no, nw), line_no(r.new_no, nw)),
+                            dim,
+                        ),
+                    );
+                }
+                lines.push((l, Style::default()));
             }
         }
         MainKind::Diff { rows, .. } => {
+            let nw = gutter_width(rows);
+            let dim = Style::default().fg(app.theme.dim);
             for r in rows.iter().skip(scroll).take(h) {
-                lines.push((
-                    Line::styled(clip(&r.text, hs), diff_style(r.kind, app)),
-                    Style::default(),
-                ));
+                let l = highlight::row_line(r, &app.theme);
+                let mut spans = vec![Span::styled(
+                    format!("{} {} │", line_no(r.old_no, nw), line_no(r.new_no, nw)),
+                    dim,
+                )];
+                spans.extend(highlight::clip_spans(l.spans, hs));
+                lines.push((Line::from(spans).style(l.style), Style::default()));
             }
         }
         MainKind::Conflict {
@@ -827,31 +1128,26 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     }
-    let text_mode = !has_cursor;
-    for (i, (line, _)) in lines.into_iter().enumerate() {
+    for (i, (mut line, _)) in lines.into_iter().enumerate() {
         let y = inner.y + i as u16;
         let idx = scroll + i;
         let r = Rect::new(inner.x, y, inner.width, 1);
         let buf: &mut Buffer = f.buffer_mut();
-        if has_cursor && idx >= sel_a && idx <= sel_b {
-            buf.set_style(
-                r,
-                Style::default().bg(if idx == cursor { cursor_bg } else { range_bg }),
-            );
-        }
-        if text_mode && hs > 0 {
-            let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let st = line
-                .spans
-                .first()
-                .map(|s| s.style)
-                .unwrap_or_default()
-                .patch(line.style);
-            buf.set_stringn(r.x, r.y, clip(&s, hs), r.width as usize, st);
+        // full-width line background; the selection wins over the diff tint
+        let line_bg = line.style.bg.take();
+        let bg = if has_cursor && idx >= sel_a && idx <= sel_b {
+            Some(if idx == cursor { cursor_bg } else { range_bg })
         } else {
-            buf.set_line(r.x, r.y, &line, r.width);
+            line_bg
+        };
+        if let Some(bg) = bg {
+            buf.set_style(r, Style::default().bg(bg));
         }
+        buf.set_line(r.x, r.y, &line, r.width);
         app.hits.push(r, Hit::MainLine(idx));
+    }
+    if matches!(app.main.kind, MainKind::Text) {
+        draw_sticky(f, app, inner);
     }
     if len == 0 && h > 0 {
         f.buffer_mut().set_string(

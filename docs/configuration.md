@@ -8,7 +8,9 @@ see [`examples/config.toml`](../examples/config.toml).
 | `commit_limit`       | `300`      | commits loaded at start (more load on scroll)   |
 | `tree_view`          | `true`     | files panel as a tree                           |
 | `side_by_side`       | `false`    | side-by-side diffs by default                   |
-| `left_width_pct`     | `35`       | width of the left column (15–85)                |
+| `syntax_highlight`   | `true`     | syntax highlighting in diffs and commit views   |
+| `word_diff`          | `true`     | highlight changed words inside modified lines (`w` toggles) |
+| `left_width`         | `40`       | width of the left column in columns (min 20)    |
 | `show_command_log`   | `true`     | show the command log                            |
 | `auto_fetch_secs`    | `0`        | background `fetch --all` interval (0 = off)     |
 | `default_remote`     | `"origin"` | remote used when pushing a branch without upstream |
@@ -24,7 +26,18 @@ removed = "red"
 hunk = "cyan"
 border = "darkgray"
 dim = "darkgray"
+added_bg = "#12281a"          # background of added lines
+removed_bg = "#301416"        # background of removed lines
+added_word_bg = "#1e5a2d"     # changed words in added lines
+removed_word_bg = "#6e2328"   # changed words in removed lines
+syntax_theme = "base16-ocean.dark"
 ```
+
+`syntax_theme` is one of the bundled syntect themes: `base16-ocean.dark`,
+`base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.light`,
+`InspiredGitHub`, `Solarized (dark)`, `Solarized (light)`. The language is
+picked from the file extension (or the first line). Diffs larger than 20 000
+lines are shown without syntax colors.
 
 ## Keybindings
 
